@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.regex.Pattern;
 
 import org.apache.pdfbox.contentstream.operator.Operator;
 import org.apache.pdfbox.cos.COSName;
@@ -52,6 +53,16 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
     private static final int REQUIRED_TEXT_LINES_FOR_EDGE = 4;
     private static final int REQUIRED_CELLS_FOR_TABLE = 4;
     private static final float IDENTICAL_TABLE_OVERLAP_RATIO = 0.9f;
+    private boolean convertToImage;
+    Pattern headerPattern= Pattern.compile(".*subject(?!s).*");
+
+    public NurminenDetectionAlgorithm(boolean convertToImage){
+        this.convertToImage = convertToImage;
+    }
+
+    public NurminenDetectionAlgorithm(){
+        this(true);
+    }
 
     /**
      * Helper class that encapsulates a text edge
@@ -99,135 +110,137 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
     @Override
     public List<Rectangle> detect(Page page) {
 
-        // get horizontal & vertical lines
-        // we get these from an image of the PDF and not the PDF itself because sometimes there are invisible PDF
-        // instructions that are interpreted incorrectly as visible elements - we really want to capture what a
-        // person sees when they look at the PDF
-        BufferedImage image;
-        PDPage pdfPage = page.getPDPage();
-        try {
-            image = Utils.pageConvertToImage(pdfPage, 144, ImageType.GRAY);
-        } catch (IOException e) {
-            return new ArrayList<Rectangle>();
-        }
-
-        List<Ruling> horizontalRulings = this.getHorizontalRulings(image);
-
-        // now check the page for vertical lines, but remove the text first to make things less confusing
-        PDDocument removeTextDocument = null;
-        try {
-            removeTextDocument = this.removeText(pdfPage);
-            image = Utils.pageConvertToImage(pdfPage, 144, ImageType.GRAY);
-        } catch (Exception e) {
-            return new ArrayList<Rectangle>();
-        } finally {
-            if (removeTextDocument != null) {
-                try {
-                    removeTextDocument.close();
-                } catch (IOException e) {
-                    // TODO Auto-generated catch block
-                    e.printStackTrace();
-                }
-            }
-        }
-
-        List<Ruling> verticalRulings = this.getVerticalRulings(image);
-
-        List<Ruling> allEdges = new ArrayList<Ruling>(horizontalRulings);
-        allEdges.addAll(verticalRulings);
-
+        //Initialize variables that we need whether or not we're looking at the image
+        List<TextChunk> textChunks = TextElement.mergeWords(page.getText());
+        List<Line> lines = TextChunk.groupByLines(textChunks);
         List<Rectangle> tableAreas = new ArrayList<Rectangle>();
+        List<Ruling> horizontalRulings = new ArrayList<>();
 
-        // if we found some edges, try to find some tables based on them
-        if (allEdges.size() > 0) {
-            // now we need to snap edge endpoints to a grid
-            Utils.snapPoints(allEdges, POINT_SNAP_DISTANCE_THRESHOLD, POINT_SNAP_DISTANCE_THRESHOLD);
+        if (convertToImage) {
+            // get horizontal & vertical lines
+            // we get these from an image of the PDF and not the PDF itself because sometimes there are invisible PDF
+            // instructions that are interpreted incorrectly as visible elements - we really want to capture what a
+            // person sees when they look at the PDF
+            BufferedImage image;
+            PDPage pdfPage = page.getPDPage();
+            try {
+                image = Utils.pageConvertToImage(pdfPage, 144, ImageType.GRAY);
+            } catch (IOException e) {
+                return new ArrayList<Rectangle>();
+            }
 
-            // normalize the rulings to make sure snapping didn't create any wacky non-horizontal/vertical rulings
-            for (List<Ruling> rulings : Arrays.asList(horizontalRulings, verticalRulings)) {
-                for (Iterator<Ruling> iterator = rulings.iterator(); iterator.hasNext(); ) {
-                    Ruling ruling = iterator.next();
+            horizontalRulings = this.getHorizontalRulings(image);
 
-                    ruling.normalize();
-                    if (ruling.oblique()) {
-                        iterator.remove();
+            // now check the page for vertical lines, but remove the text first to make things less confusing
+            PDDocument removeTextDocument = null;
+            try {
+                removeTextDocument = this.removeText(pdfPage);
+                image = Utils.pageConvertToImage(pdfPage, 144, ImageType.GRAY);
+            } catch (Exception e) {
+                return new ArrayList<Rectangle>();
+            } finally {
+                if (removeTextDocument != null) {
+                    try {
+                        removeTextDocument.close();
+                    } catch (IOException e) {
+                        // TODO Auto-generated catch block
+                        e.printStackTrace();
                     }
                 }
             }
 
-            // merge the edge lines into rulings - this makes finding edges between crossing points in the next step easier
-            // we use a larger pixel expansion than the normal spreadsheet extraction method to cover gaps in the
-            // edge detection/pixel snapping steps
-            horizontalRulings = Ruling.collapseOrientedRulings(horizontalRulings, 5);
-            verticalRulings = Ruling.collapseOrientedRulings(verticalRulings, 5);
+            List<Ruling> verticalRulings = this.getVerticalRulings(image);
 
-            // use the rulings and points to find cells
-            List<? extends Rectangle> cells = SpreadsheetExtractionAlgorithm.findCells(horizontalRulings, verticalRulings);
+            List<Ruling> allEdges = new ArrayList<Ruling>(horizontalRulings);
+            allEdges.addAll(verticalRulings);
 
-            // then use those cells to make table areas
-            tableAreas = this.getTableAreasFromCells(cells);
-        }
+            // if we found some edges, try to find some tables based on them
+            if (allEdges.size() > 0) {
+                // now we need to snap edge endpoints to a grid
+                Utils.snapPoints(allEdges, POINT_SNAP_DISTANCE_THRESHOLD, POINT_SNAP_DISTANCE_THRESHOLD);
 
-        // next find any vertical rulings that intersect tables - sometimes these won't have completely been captured as
-        // cells if there are missing horizontal lines (which there often are)
-        // let's assume though that these lines should be part of the table
-        for (Line2D.Float verticalRuling : verticalRulings) {
-            for (Rectangle tableArea : tableAreas) {
-                if (verticalRuling.intersects(tableArea) &&
-                        !(tableArea.contains(verticalRuling.getP1()) && tableArea.contains(verticalRuling.getP2()))) {
+                // normalize the rulings to make sure snapping didn't create any wacky non-horizontal/vertical rulings
+                for (List<Ruling> rulings : Arrays.asList(horizontalRulings, verticalRulings)) {
+                    for (Iterator<Ruling> iterator = rulings.iterator(); iterator.hasNext(); ) {
+                        Ruling ruling = iterator.next();
 
-                    tableArea.setTop((float) Math.floor(Math.min(tableArea.getTop(), verticalRuling.getY1())));
-                    tableArea.setBottom((float) Math.ceil(Math.max(tableArea.getBottom(), verticalRuling.getY2())));
-                    break;
+                        ruling.normalize();
+                        if (ruling.oblique()) {
+                            iterator.remove();
+                        }
+                    }
+                }
+
+                // merge the edge lines into rulings - this makes finding edges between crossing points in the next step easier
+                // we use a larger pixel expansion than the normal spreadsheet extraction method to cover gaps in the
+                // edge detection/pixel snapping steps
+                horizontalRulings = Ruling.collapseOrientedRulings(horizontalRulings, 5);
+                verticalRulings = Ruling.collapseOrientedRulings(verticalRulings, 5);
+
+                // use the rulings and points to find cells
+                List<? extends Rectangle> cells = SpreadsheetExtractionAlgorithm.findCells(horizontalRulings, verticalRulings);
+
+                // then use those cells to make table areas
+                tableAreas = this.getTableAreasFromCells(cells);
+            }
+
+            // next find any vertical rulings that intersect tables - sometimes these won't have completely been captured as
+            // cells if there are missing horizontal lines (which there often are)
+            // let's assume though that these lines should be part of the table
+            for (Line2D.Float verticalRuling : verticalRulings) {
+                for (Rectangle tableArea : tableAreas) {
+                    if (verticalRuling.intersects(tableArea) &&
+                            !(tableArea.contains(verticalRuling.getP1()) && tableArea.contains(verticalRuling.getP2()))) {
+
+                        tableArea.setTop((float) Math.floor(Math.min(tableArea.getTop(), verticalRuling.getY1())));
+                        tableArea.setBottom((float) Math.ceil(Math.max(tableArea.getBottom(), verticalRuling.getY2())));
+                        break;
+                    }
                 }
             }
-        }
 
-        // the tabula Page coordinate space is half the size of the PDFBox image coordinate space
-        // so halve the table area size before proceeding and add a bit of padding to make sure we capture everything
-        for (Rectangle area : tableAreas) {
-            area.x = (float) Math.floor(area.x / 2) - TABLE_PADDING_AMOUNT;
-            area.y = (float) Math.floor(area.y / 2) - TABLE_PADDING_AMOUNT;
-            area.width = (float) Math.ceil(area.width / 2) + TABLE_PADDING_AMOUNT;
-            area.height = (float) Math.ceil(area.height / 2) + TABLE_PADDING_AMOUNT;
-        }
-
-        // we're going to want halved horizontal lines later too
-        for (Line2D.Float ruling : horizontalRulings) {
-            ruling.x1 = ruling.x1 / 2;
-            ruling.y1 = ruling.y1 / 2;
-            ruling.x2 = ruling.x2 / 2;
-            ruling.y2 = ruling.y2 / 2;
-        }
-
-        // now look at text rows to help us find more tables and flesh out existing ones
-        List<TextChunk> textChunks = TextElement.mergeWords(page.getText());
-        List<Line> lines = TextChunk.groupByLines(textChunks);
-
-        // first look for text rows that intersect an existing table - those lines should probably be part of the table
-        for (Line textRow : lines) {
-            for (Rectangle tableArea : tableAreas) {
-                if (!tableArea.contains(textRow) && textRow.intersects(tableArea)) {
-                    tableArea.setLeft((float) Math.floor(Math.min(textRow.getLeft(), tableArea.getLeft())));
-                    tableArea.setRight((float) Math.ceil(Math.max(textRow.getRight(), tableArea.getRight())));
-                }
+            // the tabula Page coordinate space is half the size of the PDFBox image coordinate space
+            // so halve the table area size before proceeding and add a bit of padding to make sure we capture everything
+            for (Rectangle area : tableAreas) {
+                area.x = (float) Math.floor(area.x / 2) - TABLE_PADDING_AMOUNT;
+                area.y = (float) Math.floor(area.y / 2) - TABLE_PADDING_AMOUNT;
+                area.width = (float) Math.ceil(area.width / 2) + TABLE_PADDING_AMOUNT;
+                area.height = (float) Math.ceil(area.height / 2) + TABLE_PADDING_AMOUNT;
             }
-        }
 
-        // get rid of tables that DO NOT intersect any text areas - these are likely graphs or some sort of graphic
-        for (Iterator<Rectangle> iterator = tableAreas.iterator(); iterator.hasNext(); ) {
-            Rectangle table = iterator.next();
+            // we're going to want halved horizontal lines later too
+            for (Line2D.Float ruling : horizontalRulings) {
+                ruling.x1 = ruling.x1 / 2;
+                ruling.y1 = ruling.y1 / 2;
+                ruling.x2 = ruling.x2 / 2;
+                ruling.y2 = ruling.y2 / 2;
+            }
 
-            boolean intersectsText = false;
+            // first look for text rows that intersect an existing table - those lines should probably be part of the table
             for (Line textRow : lines) {
-                if (table.intersects(textRow)) {
-                    intersectsText = true;
-                    break;
+                for (Rectangle tableArea : tableAreas) {
+                    if (!tableArea.contains(textRow) && textRow.intersects(tableArea)) {
+                        tableArea.setLeft((float) Math.floor(Math.min(textRow.getLeft(), tableArea.getLeft())));
+                        tableArea.setRight((float) Math.ceil(Math.max(textRow.getRight(), tableArea.getRight())));
+                    }
                 }
             }
 
-            if (!intersectsText) {
-                iterator.remove();
+            // get rid of tables that DO NOT intersect any text areas - these are likely graphs or some sort of graphic
+            for (Iterator<Rectangle> iterator = tableAreas.iterator(); iterator.hasNext(); ) {
+                Rectangle table = iterator.next();
+
+                boolean intersectsText = false;
+                for (Line textRow : lines) {
+                    if (table.intersects(textRow)) {
+                        intersectsText = true;
+                        break;
+                    }
+                }
+
+                if (!intersectsText) {
+                    iterator.remove();
+                }
             }
         }
 
@@ -243,6 +256,23 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
 
         do {
             foundTable = false;
+
+            //check if the line just above the table area has any keywords. If so, it might be the header row so we'll
+            //include it in the table
+            for (int i = 0; i < lines.size() - 1; i++) {
+                for (Rectangle tableArea : tableAreas) {
+                    if (!tableArea.contains(lines.get(i)) && tableArea.contains(lines.get(i + 1))) {
+                        List<String> words = new ArrayList<>();
+                        for (TextChunk chunk : lines.get(i).getTextElements()) {
+                            words.add(chunk.getText());
+                        }
+                        String text = String.join("\t", words).toLowerCase();
+                        if (headerPattern.matcher(text).matches()) {
+                            tableArea.setTop((float) Math.ceil(Math.min(lines.get(i).getTop(), tableArea.getTop())));
+                        }
+                    }
+                }
+            }
 
             // get rid of any text lines contained within existing tables, this allows us to find more tables
             for (Iterator<Line> iterator = lines.iterator(); iterator.hasNext(); ) {
