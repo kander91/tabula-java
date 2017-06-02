@@ -257,6 +257,23 @@ public class NurminenDetectionAlgorithm implements DetectionAlgorithm {
         do {
             foundTable = false;
 
+            //check if the line just above the table area has any keywords. If so, it might be the header row so we'll
+            //include it in the table
+            for (int i = 0; i < lines.size() - 1; i++) {
+                for (Rectangle tableArea : tableAreas) {
+                    if (!tableArea.contains(lines.get(i)) && tableArea.contains(lines.get(i + 1))) {
+                        List<String> words = new ArrayList<>();
+                        for (TextChunk chunk : lines.get(i).getTextElements()) {
+                            words.add(chunk.getText());
+                        }
+                        String text = words.toString().toLowerCase();
+                        if (headerPattern.matcher(text).matches()) {
+                            tableArea.setTop((float) Math.ceil(Math.min(lines.get(i).getTop(), tableArea.getTop())));
+                        }
+                    }
+                }
+            }
+
             // get rid of any text lines contained within existing tables, this allows us to find more tables
             for (Iterator<Line> iterator = lines.iterator(); iterator.hasNext(); ) {
                 Line textRow = iterator.next();
